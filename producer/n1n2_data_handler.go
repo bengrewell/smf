@@ -300,7 +300,7 @@ func HandleUpCnxState(txn *transaction.Transaction, response *models.UpdateSmCon
 	return nil
 }
 
-func HandleUpdateHoState(txn *transaction.Transaction, response *models.UpdateSmContext200Response) error {
+func HandleUpdateHoState(txn *transaction.Transaction, response *models.UpdateSmContext200Response, pfcpAction *pfcpAction, pfcpParam *pfcpParam) error {
 	body := txn.Req.(models.UpdateSmContextRequest)
 	smContext := txn.Ctxt.(*context.SMContext)
 	smContextUpdateData := body.JsonData
@@ -393,6 +393,33 @@ func HandleUpdateHoState(txn *transaction.Transaction, response *models.UpdateSm
 		smContext.SubCtxLog.Debugln("PDUSessionSMContextUpdate, SMContextState Change State:", smContext.SMContextState.String())
 		smContext.HoState = models.HOSTATE_COMPLETED
 		response.JsonData.HoState = models.HOSTATE_COMPLETED.Ptr()
+
+		// Switch the downlink to the target gNB. HandleHandoverRequestAcknowledgeTransfer
+		// (in HoState_PREPARED) updated the downlink FAR's OuterHeaderCreation to the
+		// target tunnel and marked it RULE_UPDATE, but nothing ever pushed it to the
+		// UPF — so the UPF kept forwarding downlink to the source gNB and the flow did
+		// not survive the handover. Request the PFCP modification now that the UE has
+		// arrived at the target (Handover Notify).
+		if smContext.Tunnel != nil {
+			farList := []*context.FAR{}
+			for _, dataPath := range smContext.Tunnel.DataPathPool {
+				if !dataPath.Activated {
+					continue
+				}
+				for _, DLPDR := range dataPath.FirstDPNode.DownLinkTunnel.PDR {
+					if DLPDR == nil {
+						continue
+					}
+					DLPDR.FAR.State = context.RULE_UPDATE
+					farList = append(farList, DLPDR.FAR)
+				}
+			}
+			if len(farList) > 0 {
+				pfcpParam.farList = append(pfcpParam.farList, farList...)
+				pfcpAction.sendPfcpModify = true
+				smContext.ChangeState(context.SmStatePfcpModify)
+			}
+		}
 	}
 	return nil
 }
